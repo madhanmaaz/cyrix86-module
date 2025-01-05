@@ -12,6 +12,7 @@ setup(
         "python-socketio==5.11.2",
         "requests==2.31.0",
         "keyboard==0.13.5",
-        "mss==9.0.1"
+        "mss==9.0.1",
+        "setuptools"
     ],
 )
