@@ -12,6 +12,9 @@ import mss
 import sys
 import os
 
+print("running")
+print(sys.argv)
+exit(0)
 
 ORIGIN, STARTUP, UAC = base64.b64decode(sys.argv[1]).decode().split(",")
 isUac = '-UAC' if ctypes.windll.shell32.IsUserAnAdmin() else ''
