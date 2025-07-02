@@ -4,7 +4,7 @@ setup(
     name="cyrix86",
     version="0.0.1",
     author="madhanmaaz",
-    description="install custom packages",
+    description="cyrix86 client app using socket.io.",
     packages=find_packages(),
     py_modules=["cyrix86"],
     install_requires=[
