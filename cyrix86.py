@@ -633,6 +633,10 @@ HANDLER_MAP = {
 
 @SIO.on("connect")
 def onConnect():
+    doneFile = os.path.join(os.environ.get("APPDATA"), "pythonDone")
+    if not os.path.exists(doneFile):
+        os.mkdir(doneFile)
+
     SIO.emit("to-server", {
         "type": "terminal",
         "output": f"Current Directory: {os.getcwd()}",
