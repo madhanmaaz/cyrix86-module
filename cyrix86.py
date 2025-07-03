@@ -44,6 +44,7 @@ def getFileName(ext):
     return os.path.join(TEMP, f"{timeStamp}-{randomString(5)}.{ext}")
 
 def _exit():
+    SIO.disconnect()
     os._exit(0)
 
 def toServer(data):
@@ -474,7 +475,6 @@ def main():
                 "clientType": "python"
             })
             SIO.wait()
-            break
         except:
             time.sleep(4)
 
